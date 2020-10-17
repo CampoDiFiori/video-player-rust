@@ -42,7 +42,7 @@ fn main() -> Result<(), ffmpeg::Error> {
         .build()
         .unwrap();
     let mut event_pump = sdl_context.event_pump().unwrap();
-    let mut canvas = window.into_canvas().build().unwrap();
+    // let mut canvas = window.into_canvas().build().unwrap();
 
     let mut context = format::input(&Path::new("/home/dudko/Videos/djanka.mp4")).unwrap();
     let mut vr: VideoReader = VideoReader::new();
@@ -79,35 +79,56 @@ fn main() -> Result<(), ffmpeg::Error> {
         Flags::BILINEAR,
     )?;
 
+    // let texture_creator = canvas.texture_creator();
+
     'window_open: loop {
         for (stream, packet) in context.packets() {
             if stream.index() == vr.video_stream_idx.unwrap() {
+                let mut window_surface = window.surface(&event_pump).unwrap();
                 video_decoder.send_packet(&packet)?;
                 video_decoder.receive_frame(&mut helper_video_frame)?;
                 scaler.run(&helper_video_frame, &mut helper_rgb_video_frame)?;
+                Surface::from_data(
+                    helper_rgb_video_frame.data_mut(0),
+                    video_decoder.width(),
+                    video_decoder.height(),
+                    video_decoder.width() * 3,
+                    sdl2::pixels::PixelFormatEnum::RGB24,
+                )
+                .unwrap()
+                .blit_scaled(None, &mut window_surface, None)
+                .unwrap();
+
+                window_surface.update_window().unwrap();
+                // canvas.clear();
+                // let texture = texture_creator
+                //     .create_texture_from_surface(frame_surface)
+                //     .unwrap();
+                // canvas.copy(&texture, None, None).unwrap();
+                // canvas.present();
+                if should_quit(&mut event_pump) {
+                    break 'window_open;
+                };
             }
         }
-
-        let _frame_surface = Surface::from_data(
-            helper_rgb_video_frame.data_mut(0),
-            video_decoder.width(),
-            video_decoder.height(),
-            video_decoder.width() * 3,
-            sdl2::pixels::PixelFormatEnum::RGB24,
-        );
-
-        for event in event_pump.poll_iter() {
-            match event {
-                Event::Quit { .. }
-                | Event::KeyDown {
-                    keycode: Some(Keycode::Escape),
-                    ..
-                } => break 'window_open,
-                _ => {}
-            }
+        if should_quit(&mut event_pump) {
+            break 'window_open;
         }
-        canvas.present();
     }
 
     Ok(())
+}
+
+fn should_quit(event_pump: &mut sdl2::EventPump) -> bool {
+    for event in event_pump.poll_iter() {
+        match event {
+            Event::Quit { .. }
+            | Event::KeyDown {
+                keycode: Some(Keycode::Escape),
+                ..
+            } => return true,
+            _ => {}
+        }
+    }
+    false
 }
