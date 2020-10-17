@@ -14,8 +14,8 @@ use std::path::Path;
 
 #[allow(dead_code)]
 struct VideoReader {
-    audio_codec: Option<ffmpeg::decoder::Audio>,
-    video_codec: Option<ffmpeg::decoder::Video>,
+    audio_decoder: Option<ffmpeg::decoder::Audio>,
+    video_decoder: Option<ffmpeg::decoder::Video>,
     video_stream_idx: Option<usize>,
     audio_stream_idx: Option<usize>,
 }
@@ -23,8 +23,8 @@ struct VideoReader {
 impl VideoReader {
     pub fn new() -> Self {
         Self {
-            audio_codec: None,
-            video_codec: None,
+            audio_decoder: None,
+            video_decoder: None,
             audio_stream_idx: None,
             video_stream_idx: None,
         }
@@ -42,7 +42,6 @@ fn main() -> Result<(), ffmpeg::Error> {
         .build()
         .unwrap();
     let mut event_pump = sdl_context.event_pump().unwrap();
-    // let mut canvas = window.into_canvas().build().unwrap();
 
     let mut context = format::input(&Path::new("/home/dudko/Videos/djanka.mp4")).unwrap();
     let mut vr: VideoReader = VideoReader::new();
@@ -52,10 +51,10 @@ fn main() -> Result<(), ffmpeg::Error> {
 
         match codec.medium() {
             media::Type::Video => {
-                vr.video_codec = codec.decoder().video().ok();
+                vr.video_decoder = codec.decoder().video().ok();
             }
             media::Type::Audio => {
-                vr.audio_codec = codec.decoder().audio().ok();
+                vr.audio_decoder = codec.decoder().audio().ok();
             }
             _ => {}
         }
@@ -66,7 +65,7 @@ fn main() -> Result<(), ffmpeg::Error> {
         .best(media::Type::Video)
         .map(|stream| stream.index());
 
-    let mut video_decoder = vr.video_codec.unwrap();
+    let mut video_decoder = vr.video_decoder.unwrap();
     let mut helper_video_frame = frame::Video::empty();
     let mut helper_rgb_video_frame = frame::Video::empty();
     let mut scaler = Context::get(
@@ -79,8 +78,6 @@ fn main() -> Result<(), ffmpeg::Error> {
         Flags::BILINEAR,
     )?;
 
-    // let texture_creator = canvas.texture_creator();
-
     'window_open: loop {
         for (stream, packet) in context.packets() {
             if stream.index() == vr.video_stream_idx.unwrap() {
@@ -88,6 +85,7 @@ fn main() -> Result<(), ffmpeg::Error> {
                 video_decoder.send_packet(&packet)?;
                 video_decoder.receive_frame(&mut helper_video_frame)?;
                 scaler.run(&helper_video_frame, &mut helper_rgb_video_frame)?;
+
                 Surface::from_data(
                     helper_rgb_video_frame.data_mut(0),
                     video_decoder.width(),
@@ -98,14 +96,8 @@ fn main() -> Result<(), ffmpeg::Error> {
                 .unwrap()
                 .blit_scaled(None, &mut window_surface, None)
                 .unwrap();
-
                 window_surface.update_window().unwrap();
-                // canvas.clear();
-                // let texture = texture_creator
-                //     .create_texture_from_surface(frame_surface)
-                //     .unwrap();
-                // canvas.copy(&texture, None, None).unwrap();
-                // canvas.present();
+
                 if should_quit(&mut event_pump) {
                     break 'window_open;
                 };
