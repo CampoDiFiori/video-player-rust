@@ -1,15 +1,12 @@
 extern crate ffmpeg_next as ffmpeg;
 extern crate sdl2;
 
-use ffmpeg::format::Pixel;
-use ffmpeg::software::scaling::{context::Context, flag::Flags};
 #[allow(unused_imports)]
 use ffmpeg::{codec, filter, format, frame, media};
 #[allow(unused_imports)]
 use ffmpeg::{rescale, Rescale};
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
-use sdl2::surface::Surface;
 use std::path::Path;
 
 #[allow(dead_code)]
@@ -60,6 +57,8 @@ fn main() -> Result<(), ffmpeg::Error> {
         }
     }
 
+    let mut canvas = window.into_canvas().target_texture().build().unwrap();
+
     vr.video_stream_idx = context
         .streams()
         .best(media::Type::Video)
@@ -67,42 +66,57 @@ fn main() -> Result<(), ffmpeg::Error> {
 
     let mut video_decoder = vr.video_decoder.unwrap();
     let mut helper_video_frame = frame::Video::empty();
-    let mut helper_rgb_video_frame = frame::Video::empty();
-    let mut scaler = Context::get(
-        video_decoder.format(),
-        video_decoder.width(),
-        video_decoder.height(),
-        Pixel::RGB24,
-        video_decoder.width(),
-        video_decoder.height(),
-        Flags::BILINEAR,
-    )?;
+
+    let texture_creator = canvas.texture_creator();
+    let mut texture = texture_creator
+        .create_texture_target(
+            sdl2::pixels::PixelFormatEnum::IYUV,
+            video_decoder.width(),
+            video_decoder.height(),
+        )
+        .unwrap();
 
     'window_open: loop {
+        let start_time = std::time::Instant::now();
         for (stream, packet) in context.packets() {
             if stream.index() == vr.video_stream_idx.unwrap() {
-                let mut window_surface = window.surface(&event_pump).unwrap();
                 video_decoder.send_packet(&packet)?;
                 video_decoder.receive_frame(&mut helper_video_frame)?;
-                scaler.run(&helper_video_frame, &mut helper_rgb_video_frame)?;
 
-                Surface::from_data(
-                    helper_rgb_video_frame.data_mut(0),
-                    video_decoder.width(),
-                    video_decoder.height(),
-                    video_decoder.width() * 3,
-                    sdl2::pixels::PixelFormatEnum::RGB24,
-                )
-                .unwrap()
-                .blit_scaled(None, &mut window_surface, None)
-                .unwrap();
-                window_surface.update_window().unwrap();
+                texture
+                    .update_yuv(
+                        None,
+                        helper_video_frame.data(0),
+                        helper_video_frame.plane_width(0) as usize,
+                        helper_video_frame.data(1),
+                        helper_video_frame.plane_width(1) as usize,
+                        helper_video_frame.data(2),
+                        helper_video_frame.plane_width(2) as usize,
+                    )
+                    .unwrap();
+                canvas.copy(&texture, None, None).unwrap();
+
+                let frame_pts = std::time::Duration::from_secs_f64(
+                    helper_video_frame.pts().unwrap() as f64
+                        * stream.time_base().numerator() as f64
+                        / stream.time_base().denominator() as f64,
+                );
+                let duration_since_start = start_time.elapsed();
+                let sleep_time = frame_pts
+                    .checked_sub(duration_since_start)
+                    .unwrap_or(std::time::Duration::from_micros(0));
+
+                ::std::thread::sleep(sleep_time);
+
+                canvas.present();
+                // println!("Sleep time: {:?}", sleep_time);
 
                 if should_quit(&mut event_pump) {
                     break 'window_open;
                 };
             }
         }
+        ::std::thread::sleep(std::time::Duration::from_millis(24));
         if should_quit(&mut event_pump) {
             break 'window_open;
         }
