@@ -35,12 +35,42 @@ struct AudioBuffer {
     read_idx: usize,
 }
 
+const SAMPLE_SIZE: usize = 4;
+
 impl AudioBuffer {
     pub fn new() -> Self {
         Self {
             lch: Vec::new(),
             rch: Vec::new(),
             read_idx: 0,
+        }
+    }
+
+    pub fn frames_remaining(&self) -> usize {
+        (self.lch.len() - self.read_idx) / SAMPLE_SIZE
+    }
+}
+
+impl Iterator for AudioBuffer {
+    type Item = (f32, f32);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.lch.len() <= self.read_idx + 4 {
+            None
+        } else {
+            let lbytes: [u8; SAMPLE_SIZE] = self.lch[self.read_idx..(self.read_idx + SAMPLE_SIZE)]
+                .try_into()
+                .unwrap();
+            let rbytes: [u8; SAMPLE_SIZE] = self.rch[self.read_idx..(self.read_idx + SAMPLE_SIZE)]
+                .try_into()
+                .unwrap();
+
+            let lsample = std::primitive::f32::from_ne_bytes(lbytes);
+            let rsample = std::primitive::f32::from_ne_bytes(rbytes);
+
+            self.read_idx += 4;
+
+            Some((lsample, rsample))
         }
     }
 }
@@ -154,12 +184,16 @@ fn main() -> Result<(), ffmpeg::Error> {
                 audio_decoder.send_packet(&packet)?;
                 audio_decoder.receive_frame(&mut helper_audio_frame)?;
 
-                audio_buffer.lch.extend_from_slice(
-                    &helper_audio_frame.data(0)[0..(helper_audio_frame.data(0).len() / 2)],
-                );
-                // audio_buffer
-                //     .rch
-                //     .extend_from_slice(helper_audio_frame.data(1));
+                let len = unsafe {
+                    (*helper_audio_frame.as_ptr()).linesize[0]
+                        / helper_audio_frame.channels() as i32
+                } as usize;
+                audio_buffer
+                    .lch
+                    .extend_from_slice(&helper_audio_frame.data(0)[0..len]);
+                audio_buffer
+                    .rch
+                    .extend_from_slice(&helper_audio_frame.data(0)[0..len]);
 
                 ffmpeg_sample_rate = helper_audio_frame.rate() as i32;
                 helper_audio_frame.channel_layout();
@@ -175,20 +209,20 @@ fn main() -> Result<(), ffmpeg::Error> {
     }
 
     let write_callback = |stream: &mut soundio::OutStreamWriter| {
-        const STEP: usize = 4;
-        let frame_count_max = std::cmp::min(
-            stream.frame_count_max(),
-            (audio_buffer.lch.len() - audio_buffer.read_idx) / STEP,
-        );
-        stream.begin_write(frame_count_max).unwrap();
+        let frame_count_max =
+            std::cmp::min(stream.frame_count_max(), audio_buffer.frames_remaining());
+        match stream.begin_write(frame_count_max) {
+            Ok(_) => {}
+            Err(soundio::Error::Invalid) | Err(soundio::Error::Underflow) => {
+                return;
+            }
+            Err(_) => panic!("Something went terribly wrong in write_callback"),
+        };
         for f in 0..stream.frame_count() {
-            let bytes: [u8; STEP] = audio_buffer.lch
-                [audio_buffer.read_idx..(audio_buffer.read_idx + STEP)]
-                .try_into()
-                .unwrap();
-            let sample = std::primitive::f32::from_ne_bytes(bytes);
-            stream.set_sample::<f32>(0, f, sample);
-            audio_buffer.read_idx += STEP;
+            if let Some((lsample, rsample)) = audio_buffer.next() {
+                stream.set_sample::<f32>(0, f, lsample);
+                stream.set_sample::<f32>(1, f, rsample);
+            }
         }
     };
 
