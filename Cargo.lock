@@ -138,8 +138,6 @@ dependencies = [
 [[package]]
 name = "libsoundio-sys"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2195f9ee34029c950787e2bdb014b6cd69bdff20f82e27b19170ca921d93a7f"
 dependencies = [
  "cc",
  "cmake",
@@ -255,8 +253,6 @@ checksum = "7fdf1b9db47230893d76faad238fd6097fd6d6a9245cd7a4d90dbd639536bbd2"
 [[package]]
 name = "soundio"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "642a63d018a712067f22e19e407d6f6f08e1a436c156771e26171f076f8db24c"
 dependencies = [
  "libsoundio-sys",
 ]
