@@ -36,7 +36,7 @@ impl Iterator for AudioBuffer {
     type Item = (f32, f32);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.lch.len() <= self.read_idx + SAMPLE_SIZE {
+        if self.lch.len() < self.read_idx + SAMPLE_SIZE {
             None
         } else {
             let lbytes: [u8; SAMPLE_SIZE] = self.lch[self.read_idx..(self.read_idx + SAMPLE_SIZE)]

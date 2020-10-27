@@ -12,6 +12,8 @@ use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use std::path::Path;
 
+use std::sync::{Arc, Condvar, Mutex};
+
 #[allow(dead_code)]
 struct VideoReader {
     audio_decoder: Option<ffmpeg::decoder::Audio>,
@@ -100,7 +102,8 @@ fn main() -> Result<(), ffmpeg::Error> {
         .default_output_device()
         .expect("Does not support this device");
     let mut ffmpeg_sample_rate = 0;
-
+    let music_lock = Arc::new((Mutex::new(false), Condvar::new()));
+    let music_lock2 = music_lock.clone();
     'window_open: loop {
         let start_time = std::time::Instant::now();
         for (stream, packet) in context.packets() {
@@ -159,7 +162,13 @@ fn main() -> Result<(), ffmpeg::Error> {
             std::cmp::min(stream.frame_count_max(), audio_buffer.frames_remaining());
         match stream.begin_write(frame_count_max) {
             Ok(_) => {}
-            Err(soundio::Error::Invalid) | Err(soundio::Error::Underflow) => {
+            // we reached the end of the buffer
+            Err(soundio::Error::Invalid) => {
+                let (lock, cvar) = &*music_lock;
+                let mut quit_music = lock.lock().unwrap();
+                *quit_music = true;
+                cvar.notify_one();
+                // soundioctx.wakeup();
                 return;
             }
             Err(_) => panic!("Something went terribly wrong in write_callback"),
@@ -182,14 +191,17 @@ fn main() -> Result<(), ffmpeg::Error> {
             0.1f64,
             write_callback,
             Some(|| println!("Underflow")),
-            Some(|_err: soundio::Error| println!("Underflow")),
+            Some(|err: soundio::Error| println!("Write callback error: {}", err)),
         )
         .unwrap();
 
     outstream.start().unwrap();
 
-    loop {
-        soundioctx.wait_events();
+    let (lock, cvar) = &*music_lock2;
+    let mut quit_music = lock.lock().unwrap();
+    while !*quit_music {
+        // soundioctx.wait_events();
+        quit_music = cvar.wait(quit_music).unwrap();
     }
 
     Ok(())
