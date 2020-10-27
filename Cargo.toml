@@ -9,4 +9,4 @@ edition = "2018"
 [dependencies]
 ffmpeg-next = "4.3.7"
 sdl2 = "0.34"
-soundio = { path = "soundio-rs" }
+soundio = { path = "soundio" }
