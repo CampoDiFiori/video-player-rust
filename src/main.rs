@@ -10,28 +10,9 @@ use ffmpeg::{codec, filter, format, frame, media};
 use ffmpeg::{rescale, Rescale};
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
-use std::path::Path;
+use video_player_rust::decoder::{DecodedFrame, Decoder};
 
 use std::sync::{Arc, Condvar, Mutex};
-
-#[allow(dead_code)]
-struct VideoReader {
-    audio_decoder: Option<ffmpeg::decoder::Audio>,
-    video_decoder: Option<ffmpeg::decoder::Video>,
-    video_stream_idx: usize,
-    audio_stream_idx: usize,
-}
-
-impl VideoReader {
-    pub fn new() -> Self {
-        Self {
-            audio_decoder: None,
-            video_decoder: None,
-            audio_stream_idx: 0,
-            video_stream_idx: 0,
-        }
-    }
-}
 
 fn main() -> Result<(), ffmpeg::Error> {
     let sdl_context = sdl2::init().unwrap();
@@ -44,51 +25,19 @@ fn main() -> Result<(), ffmpeg::Error> {
         .build()
         .unwrap();
     let mut event_pump = sdl_context.event_pump().unwrap();
-
-    let mut context = format::input(&Path::new("/home/dudko/Videos/djanka.mp4")).unwrap();
-    let mut vr: VideoReader = VideoReader::new();
-
-    for stream in context.streams() {
-        let codec = stream.codec();
-
-        match codec.medium() {
-            media::Type::Video => {
-                vr.video_decoder = codec.decoder().video().ok();
-            }
-            media::Type::Audio => {
-                vr.audio_decoder = codec.decoder().audio().ok();
-            }
-            _ => {}
-        }
-    }
-
     let mut canvas = window.into_canvas().target_texture().build().unwrap();
 
-    vr.video_stream_idx = context
-        .streams()
-        .best(media::Type::Video)
-        .map(|stream| stream.index())
-        .unwrap();
+    let mut decoder = Decoder::new("/home/dudko/Videos/djanka.mp4");
+    let (video_width, video_height) = decoder.get_video_resolution();
 
-    vr.audio_stream_idx = context
-        .streams()
-        .best(media::Type::Audio)
-        .map(|stream| stream.index())
-        .unwrap();
-
-    let mut video_decoder = vr.video_decoder.unwrap();
-    let mut audio_decoder = vr.audio_decoder.unwrap();
-    let mut helper_video_frame = frame::Video::empty();
-    let mut helper_audio_frame = frame::Audio::empty();
-
-    let mut audio_buffer = AudioBuffer::new();
+    let mut audio_buffer_mutex = Arc::new(Mutex::new(AudioBuffer::new()));
 
     let texture_creator = canvas.texture_creator();
     let mut texture = texture_creator
         .create_texture_target(
             sdl2::pixels::PixelFormatEnum::IYUV,
-            video_decoder.width(),
-            video_decoder.height(),
+            video_width,
+            video_height,
         )
         .unwrap();
 
@@ -101,65 +50,16 @@ fn main() -> Result<(), ffmpeg::Error> {
     let out_dev = soundioctx
         .default_output_device()
         .expect("Does not support this device");
-    let mut ffmpeg_sample_rate = 0;
+    let mut ffmpeg_sample_rate = 41000;
     let music_lock = Arc::new((Mutex::new(false), Condvar::new()));
     let music_lock2 = music_lock.clone();
-    'window_open: loop {
-        let start_time = std::time::Instant::now();
-        for (stream, packet) in context.packets() {
-            if stream.index() == vr.video_stream_idx {
-                video_decoder.send_packet(&packet)?;
-                video_decoder.receive_frame(&mut helper_video_frame)?;
-
-                texture
-                    .update_yuv(
-                        None,
-                        helper_video_frame.data(0),
-                        helper_video_frame.plane_width(0) as usize,
-                        helper_video_frame.data(1),
-                        helper_video_frame.plane_width(1) as usize,
-                        helper_video_frame.data(2),
-                        helper_video_frame.plane_width(2) as usize,
-                    )
-                    .unwrap();
-                canvas.copy(&texture, None, None).unwrap();
-
-                let frame_pts = std::time::Duration::from_secs_f64(
-                    helper_video_frame.pts().unwrap() as f64
-                        * stream.time_base().numerator() as f64
-                        / stream.time_base().denominator() as f64,
-                );
-                let duration_since_start = start_time.elapsed();
-                let _sleep_time = frame_pts
-                    .checked_sub(duration_since_start)
-                    .unwrap_or(std::time::Duration::from_micros(0));
-
-                // ::std::thread::sleep(sleep_time);
-
-                canvas.present();
-                // println!("Sleep time: {:?}", sleep_time);
-            }
-            if stream.index() == vr.audio_stream_idx {
-                audio_decoder.send_packet(&packet)?;
-                audio_decoder.receive_frame(&mut helper_audio_frame)?;
-
-                audio_buffer.add_frame_data(&mut helper_audio_frame);
-                ffmpeg_sample_rate = helper_audio_frame.rate() as i32;
-                helper_audio_frame.channel_layout();
-            }
-            if should_quit(&mut event_pump) {
-                break 'window_open;
-            };
-        }
-        ::std::thread::sleep(std::time::Duration::from_millis(24));
-        if should_quit(&mut event_pump) {
-            break 'window_open;
-        }
-    }
 
     let write_callback = |stream: &mut soundio::OutStreamWriter| {
+        let mut audio_buffer = audio_buffer_mutex.lock().unwrap();
+
         let frame_count_max =
             std::cmp::min(stream.frame_count_max(), audio_buffer.frames_remaining());
+        // println!("Frames to play: {}", frame_count_max);
         match stream.begin_write(frame_count_max) {
             Ok(_) => {}
             // we reached the end of the buffer
@@ -196,6 +96,57 @@ fn main() -> Result<(), ffmpeg::Error> {
         .unwrap();
 
     outstream.start().unwrap();
+
+    let start_time = std::time::Instant::now();
+    'window_open: loop {
+        for (decoded_frame, pst_in_duration) in decoder.frames() {
+            match decoded_frame {
+                DecodedFrame::Audio(audio_frame) => {
+                    let mut audio_buffer = audio_buffer_mutex.lock().unwrap();
+                    audio_buffer.add_frame_data(&audio_frame);
+                    // println!("Frame sample rate {}", frame.rate());
+                    let duration_since_start = start_time.elapsed();
+                    let sleep_time = pst_in_duration
+                        .checked_sub(duration_since_start)
+                        .unwrap_or(std::time::Duration::from_micros(0));
+
+                    // println!("Audio frame sleep time: {:?}", sleep_time);
+
+                    ::std::thread::sleep(sleep_time);
+                }
+                DecodedFrame::Video(video_frame) => {
+                    texture
+                        .update_yuv(
+                            None,
+                            video_frame.data(0),
+                            video_frame.plane_width(0) as usize,
+                            video_frame.data(1),
+                            video_frame.plane_width(1) as usize,
+                            video_frame.data(2),
+                            video_frame.plane_width(2) as usize,
+                        )
+                        .unwrap();
+                    canvas.copy(&texture, None, None).unwrap();
+
+                    let duration_since_start = start_time.elapsed();
+                    let sleep_time = pst_in_duration
+                        .checked_sub(duration_since_start)
+                        .unwrap_or(std::time::Duration::from_micros(0));
+
+                    // println!("Video frame sleep time: {:?}", sleep_time);
+
+                    ::std::thread::sleep(sleep_time);
+
+                    canvas.present();
+                }
+            }
+        }
+
+        ::std::thread::sleep(std::time::Duration::from_millis(24));
+        if should_quit(&mut event_pump) {
+            break 'window_open;
+        }
+    }
 
     let (lock, cvar) = &*music_lock2;
     let mut quit_music = lock.lock().unwrap();
