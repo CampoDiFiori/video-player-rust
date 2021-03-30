@@ -1,9 +1,6 @@
 extern crate ffmpeg_next as ffmpeg;
 extern crate sdl2;
 
-mod audiobuffer;
-use audiobuffer::AudioBuffer;
-
 #[allow(unused_imports)]
 use ffmpeg::{codec, filter, format, frame, media};
 #[allow(unused_imports)]
@@ -11,6 +8,8 @@ use ffmpeg::{rescale, Rescale};
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use video_player_rust::decoder::{DecodedFrame, Decoder};
+
+use video_player_rust::audiobuffer::AudioBuffer;
 
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -50,12 +49,14 @@ fn main() -> Result<(), ffmpeg::Error> {
     let out_dev = soundioctx
         .default_output_device()
         .expect("Does not support this device");
-    let mut ffmpeg_sample_rate = 41000;
+    let ffmpeg_sample_rate = 44100;
     let music_lock = Arc::new((Mutex::new(false), Condvar::new()));
     let music_lock2 = music_lock.clone();
 
+    let soundio_audio_buffer = audio_buffer_mutex.clone();
+
     let write_callback = |stream: &mut soundio::OutStreamWriter| {
-        let mut audio_buffer = audio_buffer_mutex.lock().unwrap();
+        let mut audio_buffer = soundio_audio_buffer.lock().unwrap();
 
         let frame_count_max =
             std::cmp::min(stream.frame_count_max(), audio_buffer.frames_remaining());
@@ -88,7 +89,7 @@ fn main() -> Result<(), ffmpeg::Error> {
             closes_sample_rate,
             soundio::Format::Float32LE,
             soundio::ChannelLayout::get_default(2),
-            0.1f64,
+            0.05f64,
             write_callback,
             Some(|| println!("Underflow")),
             Some(|err: soundio::Error| println!("Write callback error: {}", err)),
@@ -99,11 +100,9 @@ fn main() -> Result<(), ffmpeg::Error> {
 
     let start_time = std::time::Instant::now();
     'window_open: loop {
-        for (decoded_frame, pst_in_duration) in decoder.frames() {
+        for (decoded_frame, pst_in_duration) in decoder.frames(audio_buffer_mutex.clone()) {
             match decoded_frame {
-                DecodedFrame::Audio(audio_frame) => {
-                    let mut audio_buffer = audio_buffer_mutex.lock().unwrap();
-                    audio_buffer.add_frame_data(&audio_frame);
+                DecodedFrame::Audio => {
                     // println!("Frame sample rate {}", frame.rate());
                     let duration_since_start = start_time.elapsed();
                     let sleep_time = pst_in_duration

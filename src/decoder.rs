@@ -1,5 +1,5 @@
 extern crate ffmpeg_next as ffmpeg;
-use std::{path::Path, time::{Duration, Instant}};
+use std::{path::Path, sync::{Arc, Mutex}, time::{Duration, Instant}};
 
 #[allow(unused_imports)]
 use ffmpeg::{codec, filter, format, frame, media};
@@ -20,6 +20,7 @@ pub struct Decoder {
     streams_data: StreamsData,
 }
 
+#[derive(Clone)]
 pub struct PacketBuffer {
     audio_packets: Vec<ffmpeg::Packet>,
     video_packets: Vec<ffmpeg::Packet>,
@@ -28,6 +29,7 @@ pub struct PacketBuffer {
 pub struct FrameIter<'a> {
     decoder: &'a mut Decoder,
     packet_buffer: PacketBuffer,
+    audio_buffer_mutex: Arc<Mutex<AudioBuffer>>,
     audio_packet_idx: usize,
     video_packet_idx: usize,
 }
@@ -80,39 +82,50 @@ impl Decoder {
         let mut audio_packets = Vec::new();
         let mut video_packets = Vec::new();
 
-        #[derive(PartialEq)]
-        enum PrevPacket {
-            None,
-            Audio,
-            Video,
-        }
+        let video_stream_idx = self.streams_data.video_stream_idx;
+        let audio_stream_idx = self.streams_data.audio_stream_idx;
 
-        let mut prev_packet = PrevPacket::None;
-        let mut reading_state = 0u8;
-
-        for (stream, packet) in self.input.packets() {
-            if stream.index() == self.streams_data.video_stream_idx {
+        self.input.packets().into_iter().for_each(|(stream, packet)| {
+            if stream.index() == video_stream_idx {
                 video_packets.push(packet);
-
-                if prev_packet != PrevPacket::Video {
-                    reading_state = reading_state + 1;
-                }
-                if reading_state == 3 {
-                    break;
-                }
-                prev_packet = PrevPacket::Video;
-            } else if stream.index() == self.streams_data.audio_stream_idx {
+            } else if stream.index() == audio_stream_idx {
                 audio_packets.push(packet);
-
-                if prev_packet != PrevPacket::Audio {
-                    reading_state = reading_state + 1;
-                }
-                if reading_state == 3 {
-                    break;
-                }
-                prev_packet = PrevPacket::Audio;
             }
-        }
+        });
+
+        // #[derive(PartialEq)]
+        // enum PrevPacket {
+        //     None,
+        //     Audio,
+        //     Video,
+        // }
+
+        // let mut prev_packet = PrevPacket::None;
+        // let mut reading_state = 0u8;
+
+        // for (stream, packet) in self.input.packets() {
+        //     if stream.index() == self.streams_data.video_stream_idx {
+        //         video_packets.push(packet);
+
+        //         if prev_packet != PrevPacket::Video {
+        //             reading_state = reading_state + 1;
+        //         }
+        //         if reading_state == 3 {
+        //             break;
+        //         }
+        //         prev_packet = PrevPacket::Video;
+        //     } else if stream.index() == self.streams_data.audio_stream_idx {
+        //         audio_packets.push(packet);
+
+        //         if prev_packet != PrevPacket::Audio {
+        //             reading_state = reading_state + 1;
+        //         }
+        //         if reading_state == 3 {
+        //             break;
+        //         }
+        //         prev_packet = PrevPacket::Audio;
+        //     }
+        // }
 
         PacketBuffer {
             audio_packets,
@@ -120,15 +133,14 @@ impl Decoder {
         }
     }
 
-    pub fn frames(&mut self) -> FrameIter {
-        let packet_iter_start = Instant::now();
+    pub fn frames<'a>(&'a mut self, audio_buffer_mutex: Arc<Mutex<AudioBuffer>>) -> FrameIter<'a> {
         let packet_buffer = self.next_packet_buffer();
-        let packet_iter_end = packet_iter_start.elapsed();
 
         // println!("Packet iteration duration: {:?}", packet_iter_end);
 
         FrameIter {
             packet_buffer,
+            audio_buffer_mutex,
             decoder: self,
             audio_packet_idx: 0,
             video_packet_idx: 0,
@@ -146,38 +158,53 @@ fn calc_video_frame_pts(streams_data: StreamsData, video_frame: &ffmpeg::frame::
     )
 }
 
-fn calc_audio_frame_pts(streams_data: StreamsData, audio_frame: &ffmpeg::frame::Audio) -> Duration {
+fn calc_audio_frame_pts(streams_data: StreamsData, audio_frame_pts: f64) -> Duration {
     std::time::Duration::from_secs_f64(
-        audio_frame.pts().unwrap() as f64 * streams_data.audio_stream_frame_len,
+        audio_frame_pts * streams_data.audio_stream_frame_len,
     )
 }
 
 use ffmpeg::frame::{Audio, Video};
 
+use crate::audiobuffer::AudioBuffer;
+
 pub enum DecodedFrame {
-    Audio(Audio),
+    Audio,
     Video(Video),
 }
 
+const ITER_SIZE: usize = 1000;
+
+
 fn decode_next_audio_packet(frame_iter: &mut FrameIter) -> Option<(DecodedFrame, Duration)> {
-    let next_audio_packet = &frame_iter.packet_buffer.audio_packets[frame_iter.audio_packet_idx];
-    let mut audio_frame = ffmpeg::frame::Audio::empty();
-    frame_iter
-        .decoder
-        .audio_decoder
-        .send_packet(next_audio_packet)
-        .unwrap();
-    frame_iter
-        .decoder
-        .audio_decoder
-        .receive_frame(&mut audio_frame)
-        .unwrap();
+    let packet_buffer = frame_iter.packet_buffer.clone();
+    let mut first_packet_pts = None;
+    let curr_idx = frame_iter.audio_packet_idx;
 
-    let pts = calc_audio_frame_pts(frame_iter.decoder.streams_data, &audio_frame);
+    packet_buffer.audio_packets[curr_idx..].iter().take(ITER_SIZE).for_each(|packet| {
+        let mut audio_frame = ffmpeg::frame::Audio::empty();
+        if first_packet_pts == None {
+            first_packet_pts = Some(packet.pts().unwrap() as f64);
+        }
+        frame_iter
+            .decoder
+            .audio_decoder
+            .send_packet(packet)
+            .unwrap();
+        frame_iter
+            .decoder
+            .audio_decoder
+            .receive_frame(&mut audio_frame)
+            .unwrap();
+        
+        frame_iter.audio_buffer_mutex.lock().unwrap().add_frame_data(&audio_frame);
+    });
 
-    frame_iter.audio_packet_idx = frame_iter.audio_packet_idx + 1;
+    let pts = calc_audio_frame_pts(frame_iter.decoder.streams_data, first_packet_pts.unwrap());
 
-    Some((DecodedFrame::Audio(audio_frame), pts))
+    frame_iter.audio_packet_idx = frame_iter.audio_packet_idx + ITER_SIZE;
+
+    Some((DecodedFrame::Audio, pts))
 }
 
 fn decode_next_video_packet(frame_iter: &mut FrameIter) -> Option<(DecodedFrame, Duration)> {

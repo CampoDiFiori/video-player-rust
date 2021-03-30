@@ -1,4 +1,5 @@
 use std::convert::TryInto;
+use ffmpeg_next as ffmpeg;
 
 pub struct AudioBuffer {
     lch: Vec<u8>,
