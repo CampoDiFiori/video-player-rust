@@ -1,0 +1,3 @@
+[submodule "soundio"]
+	path = soundio
+	url = https://github.com/CampoDiFiori/soundio-rs
